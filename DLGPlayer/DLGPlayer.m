@@ -32,12 +32,15 @@
 
 @property (nonatomic, strong) NSThread *frameReaderThread;
 @property (nonatomic) BOOL notifiedBufferStart;
+
 @property (nonatomic) BOOL requestSeek;
 @property (nonatomic) double requestSeekPosition;
 @property (nonatomic) BOOL opening;
 
 @property (nonatomic, strong) dispatch_semaphore_t vFramesLock;
 @property (nonatomic, strong) dispatch_semaphore_t aFramesLock;
+
+@property (nonatomic) BOOL canPlay;
 
 @end
 
@@ -360,29 +363,57 @@
 }
 
 - (void)render {
-    if (!self.playing) return;
+    if (!self.playing) {
+        NSLog(@"🔴🔴🔴 NOT PLAYING");
+        return;
+    }
 
     BOOL eof = self.decoder.isEOF;
     BOOL noframes = ((self.decoder.hasVideo && self.vframes.count <= 0) ||
                      (self.decoder.hasAudio && self.aframes.count <= 0));
-    
+
+    BOOL bufferIsLow = self.bufferedDuration <= self.maxBufferDuration - self.minBufferDuration;
+    BOOL bufferIsFilled = self.bufferedDuration >= self.maxBufferDuration;
+
     // Check if reach the end and play all frames.
     if (noframes && eof) {
         [self pause];
         [[NSNotificationCenter defaultCenter] postNotificationName:DLGPlayerNotificationEOF object:self];
+        NSLog(@"🔴🔴🔴 NO FRAMES AND EOF - STOP");
         return;
     }
-    
+
     if (noframes && !self.notifiedBufferStart) {
         self.notifiedBufferStart = YES;
+
         NSDictionary *userInfo = @{ DLGPlayerNotificationBufferStateKey : @(self.notifiedBufferStart) };
         [[NSNotificationCenter defaultCenter] postNotificationName:DLGPlayerNotificationBufferStateChanged object:self userInfo:userInfo];
-    } else if (!noframes && self.notifiedBufferStart && self.bufferedDuration >= self.minBufferDuration) {
+
+        NSLog(@"❎ NO FRAMES - START FILLING A BUFFER");
+        NSLog(@"🌈 Duration: %f, canPlay = %@", self.bufferedDuration, self.canPlay ? @"YES" : @"NO");
+    } else if (!noframes && self.notifiedBufferStart && bufferIsFilled) {
         self.notifiedBufferStart = NO;
+        self.canPlay = YES;
+
         NSDictionary *userInfo = @{ DLGPlayerNotificationBufferStateKey : @(self.notifiedBufferStart) };
         [[NSNotificationCenter defaultCenter] postNotificationName:DLGPlayerNotificationBufferStateChanged object:self userInfo:userInfo];
+
+        NSLog(@"🔴 A BUFFER IS FILLED - STOP");
+        NSLog(@"🌈 Duration: %f, canPlay = %@", self.bufferedDuration, self.canPlay ? @"YES" : @"NO");
+    } else if (!self.notifiedBufferStart && bufferIsLow) {
+        self.notifiedBufferStart = YES;
+        self.canPlay = YES;
+
+        NSDictionary *userInfo = @{ DLGPlayerNotificationBufferStateKey : @(self.notifiedBufferStart) };
+        [[NSNotificationCenter defaultCenter] postNotificationName:DLGPlayerNotificationBufferStateChanged object:self userInfo:userInfo];
+
+        NSLog(@"❎ MIN BUFFER SIZE REACHED - START FILLING A BUFFER");
+        NSLog(@"🌈 Duration: %f, canPlay = %@", self.bufferedDuration, self.canPlay ? @"YES" : @"NO");
+    } else if (self.bufferedDuration <= self.minBufferDuration) {
+        self.canPlay = NO;
+        NSLog(@"🌈 Duration: %f, canPlay = %@", self.bufferedDuration, self.canPlay ? @"YES" : @"NO");
     }
-    
+
     // Render if has picture
     if (self.decoder.hasPicture && self.vframes.count > 0) {
         DLGPlayerVideoFrame *frame = self.vframes[0];
@@ -392,7 +423,7 @@
     }
     
     // Check whether render is neccessary
-    if (self.vframes.count <= 0 || !self.decoder.hasVideo || self.notifiedBufferStart) {
+    if (self.vframes.count <= 0 || !self.decoder.hasVideo || !self.canPlay) {
         __weak typeof(self)weakSelf = self;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             [weakSelf render];
